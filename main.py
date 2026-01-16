@@ -7,6 +7,8 @@ import time
 import os
 import uvicorn
 import platform
+import multiprocessing
+
 
 # =========================================================
 # App Initialization
@@ -26,7 +28,8 @@ os.makedirs(RECORDINGS_DIR, exist_ok=True)
 # =========================================================
 
 CAMERA_SOURCES = {
-    "pc_cam": [0]  # Default laptop / PC webcam
+    "pc_cam": [0] ,
+    "mobile_cam" :["http://192.168.1.5:8080/video"]# Default laptop / PC webcam
 }
 
 # =========================================================
@@ -219,6 +222,36 @@ def play_beep():
             print("\a", end="", flush=True)
     except Exception as e:
         print(f"[WARN] Beep failed: {e}")
+
+
+# =========================================================
+# Multiprocessing Camera Recording Worker (NEW)
+# =========================================================
+
+def camera_process_worker(event_id: str, alert_type: str, camera_id: str, duration: int):
+    """
+    Worker function to be run in a separate process.
+    Calls the existing record_live_video() synchronously.
+    """
+    import asyncio
+    asyncio.run(record_live_video(event_id, alert_type, camera_id, duration))
+
+# =========================================================
+# Multiprocessing Camera Event Launcher (NEW)
+# =========================================================
+
+async def record_camera_event(event_id: str, alert_type: str, camera_id: str, duration: int = 15):
+    """
+    Launches a separate process to record video from a single camera.
+    Non-blocking for the main event pipeline.
+    """
+    process = multiprocessing.Process(
+        target=camera_process_worker,
+        args=(event_id, alert_type, camera_id, duration),
+        daemon=True  # ensures process exits if main app stops
+    )
+    process.start()
+    print(f"[PROCESS] Event={event_id} | Camera={camera_id} | Process PID={process.pid} started")
 
 
 
