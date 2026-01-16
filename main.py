@@ -253,6 +253,22 @@ async def record_camera_event(event_id: str, alert_type: str, camera_id: str, du
     process.start()
     print(f"[PROCESS] Event={event_id} | Camera={camera_id} | Process PID={process.pid} started")
 
+# =========================================================
+# Start Multiple Cameras Concurrently (NEW)
+# =========================================================
+
+async def start_cameras_concurrently(event_id: str, alert_type: str, camera_ids: list, duration: int = 15):
+    """
+    Starts recording for multiple cameras concurrently.
+    Each camera runs in a separate process.
+    """
+    tasks = []
+    for cam_id in camera_ids:
+        # Create an async task for each camera
+        tasks.append(asyncio.create_task(record_camera_event(event_id, alert_type, cam_id, duration)))
+
+    # Run all camera tasks concurrently
+    await asyncio.gather(*tasks)
 
 
 if __name__ == "__main__":
