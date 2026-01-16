@@ -1,4 +1,5 @@
 from fastapi import FastAPI, Request
+import threading
 import uuid
 import asyncio
 import cv2
@@ -141,7 +142,7 @@ async def trigger_and_record(
     await record_live_video(event_id, alert_type, camera_id)
 
 # =========================================================
-# Dispatcher Logic
+# Dispatcher Logic (Corrected Simultaneous Trigger+Video)
 # =========================================================
 
 async def dispatch_alert_action(
@@ -151,24 +152,29 @@ async def dispatch_alert_action(
 ):
     action = ALERT_ACTION_MAP.get(alert_type)
 
-    if action == "TRIGGER_AND_VIDEO":
-        def play_beep_in_thread():
-             threading.Thread(
-             target=play_beep,
-             daemon=True).start()
+    # Threaded beep for TRIGGER+VIDEO
+    def play_beep_in_thread():
+        threading.Thread(
+            target=play_beep,
+            daemon=True
+        ).start()
 
+    if action == "TRIGGER_AND_VIDEO":
+        # 🔹 Start beep
+        play_beep_in_thread()
+        # 🔹 Start alert async
         asyncio.create_task(trigger_alert(event_id, alert_type))
+        # 🔹 Start video recording async
+        asyncio.create_task(record_live_video(event_id, alert_type, camera_id))
+        print("[DISPATCH] Executed TRIGGER+VIDEO simultaneously")
 
     elif action == "TRIGGER_ONLY":
-        play_beep()
-        asyncio.create_task(
-            record_live_video(event_id, alert_type, camera_id)
-        )
+        asyncio.create_task(trigger_alert(event_id, alert_type))
+        print("[DISPATCH] Executed TRIGGER ONLY")
 
-    elif action == "VIDEO_ONLY" :
-        asyncio.create_task(
-            trigger_and_record(event_id, alert_type, camera_id)
-        )
+    elif action == "VIDEO_ONLY":
+        asyncio.create_task(record_live_video(event_id, alert_type, camera_id))
+        print("[DISPATCH] Executed VIDEO ONLY")
 
     else:
         print(f"[INFO] No action mapped for alert: {alert_type}")
@@ -223,3 +229,4 @@ if __name__ == "__main__":
         port=8000,
         reload=True
     )
+
