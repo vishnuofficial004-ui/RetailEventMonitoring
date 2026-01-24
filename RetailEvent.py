@@ -3,6 +3,8 @@ import numpy as np
 from collections import deque
 from datetime import datetime
 from openvino.runtime import Core
+import json
+import time
 
 # ---------- Load Models ----------
 ie = Core()
@@ -68,11 +70,11 @@ def draw_timestamp(frame):
     y = frame.shape[0] - 10
     cv2.putText(frame, timestamp, (x, y), font, scale, color, thickness, cv2.LINE_AA)
 
-# ---------- Define Shelf Zone (x1, y1, x2, y2) ----------
+# ---------- Define Shelf Zone ----------
 SHELF_ZONE = (300, 100, 600, 400)  # example rectangle
 cv2_color = (0, 255, 255)  # yellow for zone
 
-# ---------- Hand History for Action Encoder ----------
+# ---------- Hand History for Smart Encoder ----------
 hand_history = {
     "right": deque(maxlen=5),
     "left": deque(maxlen=5)
@@ -88,10 +90,11 @@ while True:
 
     H, W = frame.shape[:2]
 
-    # Draw shelf zone rectangle
+    # Draw shelf zone
     cv2.rectangle(frame, (SHELF_ZONE[0], SHELF_ZONE[1]), (SHELF_ZONE[2], SHELF_ZONE[3]), cv2_color, 2)
 
     action_detected = "None"
+    action_json = None
 
     # ---- Person Detection ----
     det_img = cv2.resize(frame, (det_w, det_h)).transpose(2,0,1)
@@ -143,39 +146,63 @@ while True:
             if points[a] and points[b]:
                 cv2.line(frame, points[a], points[b], (255,0,0), 2)
 
-        # ---------- Action Encoder ----------
+        # ---------- Smart Action Encoder ----------
         right_hand = points[4]  # right wrist
         left_hand = points[7]   # left wrist
-
         hand_positions = {"right": right_hand, "left": left_hand}
-        for h, pos in hand_positions.items():
-            if pos:
-                hand_history[h].append(pos)
-            else:
-                hand_history[h].append(None)
 
-        # ---------- Action Decoder (Rule-Based) ----------
-        # Simple logic: hand enters shelf zone → reaching; leaves → pick
+        for h, pos in hand_positions.items():
+            hand_history[h].append(pos)
+
+        # ---------- Smart Action Decoder ----------
         for h, pos in hand_positions.items():
             if pos is None:
                 continue
+
             x, y = pos
             hx1, hy1, hx2, hy2 = SHELF_ZONE
+
+            prev_pos = hand_history[h][-2] if len(hand_history[h]) > 1 else None
+
+            # Entering shelf → reaching
             if hx1 <= x <= hx2 and hy1 <= y <= hy2:
                 action_detected = f"{h}_reaching_shelf"
-            elif len(hand_history[h]) > 1 and hand_history[h][-2] is not None:
-                prev_x, prev_y = hand_history[h][-2]
-                if hx1 <= prev_x <= hx2 and hy1 <= prev_y <= hy2:
-        # just exited shelf
-                  action_detected = f"{h}_picked_object"
-    # ---------- Draw timestamp & detected action ----------
-    draw_timestamp(frame)
-    cv2.putText(frame, f"Action: {action_detected}", (10, H-10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,0), 2)
+            # Leaving shelf → picked
+            elif prev_pos:
+                px, py = prev_pos
+                if hx1 <= px <= hx2 and hy1 <= py <= hy2:
+                    action_detected = f"{h}_picked_object"
+            # Moving back toward torso → hide
+            # Torso approximated by midpoint of shoulders: points[1] and points[2]
+            if points[1] and points[2]:
+                torso_x = (points[1][0] + points[2][0]) // 2
+                torso_y = (points[1][1] + points[2][1]) // 2
+                if prev_pos and prev_pos[1] < torso_y and y >= torso_y:
+                    action_detected = f"{h}_hide_object"
 
-    cv2.imshow("Pose + Action Encoder/Decoder", frame)
+            # Build JSON
+            action_json = {
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
+                "person_id": 1,
+                "action": action_detected,
+                "hand": h,
+                "coordinates": [x, y]
+            }
+
+    # ---------- Draw timestamp & action ----------
+    draw_timestamp(frame)
+    cv2.putText(frame, f"Action: {action_detected}", (10, H-10),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,0), 2)
+
+    # Optional: print JSON event to console
+    if action_json:
+        print(json.dumps(action_json))
+
+    cv2.imshow("Pose + Smart Action Encoder/Decoder", frame)
 
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
 
 cap.release()
 cv2.destroyAllWindows()
+
