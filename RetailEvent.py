@@ -4,7 +4,10 @@ from collections import deque
 from datetime import datetime
 from openvino.runtime import Core
 import json
-import time
+
+# ---- Import external action encoder/decoder ----
+from action_rules import ActionEncoderDecoder
+
 
 # ---------- Load Models ----------
 ie = Core()
@@ -23,6 +26,7 @@ pose_input = pose_compiled.input(0)
 pose_output = pose_compiled.output(0)
 _, _, pose_h, pose_w = pose_input.shape
 
+
 # ---------- Skeleton Pairs ----------
 POSE_PAIRS = [
     (1,2),(1,5),(2,3),(3,4),(5,6),(6,7),
@@ -30,6 +34,7 @@ POSE_PAIRS = [
     (1,0),(0,14),(14,16),(0,15),(15,17)
 ]
 NUM_JOINTS = 18
+
 
 # ---------- Heatmap Decoder ----------
 def decode_pose(heatmaps):
@@ -39,6 +44,7 @@ def decode_pose(heatmaps):
         _, conf, _, maxLoc = cv2.minMaxLoc(hmap)
         joints.append((maxLoc[0], maxLoc[1], conf))
     return joints
+
 
 # ---------- Temporal Smoothing ----------
 SMOOTHING_FRAMES = 3
@@ -57,6 +63,7 @@ def smooth_points(points):
             smoothed.append((int(sum(xs)/len(xs)), int(sum(ys)/len(ys))))
     return smoothed
 
+
 # ---------- Timestamp Function ----------
 def draw_timestamp(frame):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -70,15 +77,16 @@ def draw_timestamp(frame):
     y = frame.shape[0] - 10
     cv2.putText(frame, timestamp, (x, y), font, scale, color, thickness, cv2.LINE_AA)
 
-# ---------- Define Shelf Zone ----------
-SHELF_ZONE = (300, 100, 600, 400)  # example rectangle
-cv2_color = (0, 255, 255)  # yellow for zone
 
-# ---------- Hand History for Smart Encoder ----------
-hand_history = {
-    "right": deque(maxlen=5),
-    "left": deque(maxlen=5)
-}
+# ---------- Define Shelf Zone ----------
+# (Adjust these values according to your camera view)
+SHELF_ZONE = (300, 100, 600, 400)
+ZONE_COLOR = (0, 255, 255)
+
+
+# ---------- Initialize Action Engine ----------
+action_engine = ActionEncoderDecoder(SHELF_ZONE)
+
 
 # ---------- Camera ----------
 cap = cv2.VideoCapture(0)
@@ -91,14 +99,19 @@ while True:
     H, W = frame.shape[:2]
 
     # Draw shelf zone
-    cv2.rectangle(frame, (SHELF_ZONE[0], SHELF_ZONE[1]), (SHELF_ZONE[2], SHELF_ZONE[3]), cv2_color, 2)
+    cv2.rectangle(frame, 
+                  (SHELF_ZONE[0], SHELF_ZONE[1]),
+                  (SHELF_ZONE[2], SHELF_ZONE[3]),
+                  ZONE_COLOR, 2)
 
     action_detected = "None"
     action_json = None
 
     # ---- Person Detection ----
-    det_img = cv2.resize(frame, (det_w, det_h)).transpose(2,0,1)
+    det_img = cv2.resize(frame, (det_w, det_h))
+    det_img = det_img.transpose(2, 0, 1)
     det_img = np.expand_dims(det_img, axis=0)
+
     det_result = det_compiled([det_img])[det_output]
 
     for det in det_result[0][0]:
@@ -111,14 +124,15 @@ while True:
         xmax = min(W, int(det[5] * W) + pad)
         ymax = min(H, int(det[6] * H) + pad)
 
-        cv2.rectangle(frame, (xmin,ymin), (xmax,ymax), (0,255,0), 2)
+        cv2.rectangle(frame, (xmin, ymin), (xmax, ymax), (0,255,0), 2)
 
         person = frame[ymin:ymax, xmin:xmax]
         if person.size == 0:
             continue
 
         # ---- Pose Inference ----
-        pose_img = cv2.resize(person, (pose_w, pose_h)).transpose(2,0,1)
+        pose_img = cv2.resize(person, (pose_w, pose_h))
+        pose_img = pose_img.transpose(2, 0, 1)
         pose_img = np.expand_dims(pose_img, axis=0)
 
         pose_result = pose_compiled([pose_img])[pose_output][0]
@@ -126,83 +140,56 @@ while True:
 
         joints = decode_pose(heatmaps)
 
-        # Map to frame coordinates
+        # ---- Map joints to frame coordinates ----
         points = []
         for xh, yh, jc in joints:
             if jc < 0.03:
                 points.append(None)
                 continue
+
             x = int((xh / 57) * (xmax - xmin)) + xmin
             y = int((yh / 32) * (ymax - ymin)) + ymin
             points.append((x, y))
 
+        # ---- Apply smoothing ----
         points = smooth_points(points)
 
-        # Draw joints & skeleton
+        # ---- Draw joints ----
         for p in points:
             if p:
                 cv2.circle(frame, p, 4, (0,0,255), -1)
-        for a,b in POSE_PAIRS:
+
+        # ---- Draw skeleton ----
+        for a, b in POSE_PAIRS:
             if points[a] and points[b]:
                 cv2.line(frame, points[a], points[b], (255,0,0), 2)
 
-        # ---------- Smart Action Encoder ----------
-        right_hand = points[4]  # right wrist
-        left_hand = points[7]   # left wrist
-        hand_positions = {"right": right_hand, "left": left_hand}
+        # ---- Call Smart Action Encoder/Decoder ----
+        action_detected, action_json = action_engine.update(points)
 
-        for h, pos in hand_positions.items():
-            hand_history[h].append(pos)
-
-        # ---------- Smart Action Decoder ----------
-        for h, pos in hand_positions.items():
-            if pos is None:
-                continue
-
-            x, y = pos
-            hx1, hy1, hx2, hy2 = SHELF_ZONE
-
-            prev_pos = hand_history[h][-2] if len(hand_history[h]) > 1 else None
-
-            # Entering shelf → reaching
-            if hx1 <= x <= hx2 and hy1 <= y <= hy2:
-                action_detected = f"{h}_reaching_shelf"
-            # Leaving shelf → picked
-            elif prev_pos:
-                px, py = prev_pos
-                if hx1 <= px <= hx2 and hy1 <= py <= hy2:
-                    action_detected = f"{h}_picked_object"
-            # Moving back toward torso → hide
-            # Torso approximated by midpoint of shoulders: points[1] and points[2]
-            if points[1] and points[2]:
-                torso_x = (points[1][0] + points[2][0]) // 2
-                torso_y = (points[1][1] + points[2][1]) // 2
-                if prev_pos and prev_pos[1] < torso_y and y >= torso_y:
-                    action_detected = f"{h}_hide_object"
-
-            # Build JSON
-            action_json = {
-                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
-                "person_id": 1,
-                "action": action_detected,
-                "hand": h,
-                "coordinates": [x, y]
-            }
-
-    # ---------- Draw timestamp & action ----------
+    # ---- Draw timestamp ----
     draw_timestamp(frame)
-    cv2.putText(frame, f"Action: {action_detected}", (10, H-10),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,0), 2)
 
-    # Optional: print JSON event to console
+    # ---- Display detected action ----
+    cv2.putText(frame, f"Action: {action_detected}",
+                (10, H-10),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (0,255,0),
+                2)
+
+    # ---- Print JSON event ----
     if action_json:
         print(json.dumps(action_json))
 
-    cv2.imshow("Pose + Smart Action Encoder/Decoder", frame)
+    # ---- Display Window ----
+    cv2.imshow("Retail Event Monitoring", frame)
 
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
 
+
 cap.release()
 cv2.destroyAllWindows()
+
 
