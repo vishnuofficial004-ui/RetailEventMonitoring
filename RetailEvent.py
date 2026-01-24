@@ -60,13 +60,23 @@ def draw_timestamp(frame):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     font = cv2.FONT_HERSHEY_SIMPLEX
     scale = 0.5
-    color = (255, 255, 255)  # white
+    color = (255, 255, 255)
     thickness = 1
     text_size, _ = cv2.getTextSize(timestamp, font, scale, thickness)
     text_w, text_h = text_size
     x = frame.shape[1] - text_w - 10
     y = frame.shape[0] - 10
     cv2.putText(frame, timestamp, (x, y), font, scale, color, thickness, cv2.LINE_AA)
+
+# ---------- Define Shelf Zone (x1, y1, x2, y2) ----------
+SHELF_ZONE = (300, 100, 600, 400)  # example rectangle
+cv2_color = (0, 255, 255)  # yellow for zone
+
+# ---------- Hand History for Action Encoder ----------
+hand_history = {
+    "right": deque(maxlen=5),
+    "left": deque(maxlen=5)
+}
 
 # ---------- Camera ----------
 cap = cv2.VideoCapture(0)
@@ -78,6 +88,11 @@ while True:
 
     H, W = frame.shape[:2]
 
+    # Draw shelf zone rectangle
+    cv2.rectangle(frame, (SHELF_ZONE[0], SHELF_ZONE[1]), (SHELF_ZONE[2], SHELF_ZONE[3]), cv2_color, 2)
+
+    action_detected = "None"
+
     # ---- Person Detection ----
     det_img = cv2.resize(frame, (det_w, det_h)).transpose(2,0,1)
     det_img = np.expand_dims(det_img, axis=0)
@@ -87,7 +102,6 @@ while True:
         if float(det[2]) < 0.6:
             continue
 
-        # ---------- Robust Bounding Box ----------
         pad = 20
         xmin = max(0, int(det[3] * W) - pad)
         ymin = max(0, int(det[4] * H) - pad)
@@ -109,35 +123,56 @@ while True:
 
         joints = decode_pose(heatmaps)
 
-        # ---- Map joints to frame coordinates ----
+        # Map to frame coordinates
         points = []
         for xh, yh, jc in joints:
-            if jc < 0.03:  # lower confidence threshold
+            if jc < 0.03:
                 points.append(None)
                 continue
-
             x = int((xh / 57) * (xmax - xmin)) + xmin
             y = int((yh / 32) * (ymax - ymin)) + ymin
-            points.append((x,y))
+            points.append((x, y))
 
-        # ---- Apply Temporal Smoothing ----
         points = smooth_points(points)
 
-        # ---- Draw Joints ----
+        # Draw joints & skeleton
         for p in points:
             if p:
                 cv2.circle(frame, p, 4, (0,0,255), -1)
-
-        # ---- Draw Skeleton Lines ----
         for a,b in POSE_PAIRS:
             if points[a] and points[b]:
                 cv2.line(frame, points[a], points[b], (255,0,0), 2)
 
-    # ---- Draw Timestamp ----
-    draw_timestamp(frame)
+        # ---------- Action Encoder ----------
+        right_hand = points[4]  # right wrist
+        left_hand = points[7]   # left wrist
 
-    # ---- Display ----
-    cv2.imshow("Robust CPU Pose + Timestamp", frame)
+        hand_positions = {"right": right_hand, "left": left_hand}
+        for h, pos in hand_positions.items():
+            if pos:
+                hand_history[h].append(pos)
+            else:
+                hand_history[h].append(None)
+
+        # ---------- Action Decoder (Rule-Based) ----------
+        # Simple logic: hand enters shelf zone → reaching; leaves → pick
+        for h, pos in hand_positions.items():
+            if pos is None:
+                continue
+            x, y = pos
+            hx1, hy1, hx2, hy2 = SHELF_ZONE
+            if hx1 <= x <= hx2 and hy1 <= y <= hy2:
+                action_detected = f"{h}_reaching_shelf"
+            elif len(hand_history[h]) > 1 and hand_history[h][-2] is not None:
+                prev_x, prev_y = hand_history[h][-2]
+                if hx1 <= prev_x <= hx2 and hy1 <= prev_y <= hy2:
+        # just exited shelf
+                  action_detected = f"{h}_picked_object"
+    # ---------- Draw timestamp & detected action ----------
+    draw_timestamp(frame)
+    cv2.putText(frame, f"Action: {action_detected}", (10, H-10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,0), 2)
+
+    cv2.imshow("Pose + Action Encoder/Decoder", frame)
 
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
