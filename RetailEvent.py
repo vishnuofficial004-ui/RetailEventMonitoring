@@ -1,6 +1,7 @@
 import cv2
 import numpy as np
 from collections import deque
+from datetime import datetime
 from openvino.runtime import Core
 
 # ---------- Load Models ----------
@@ -38,7 +39,7 @@ def decode_pose(heatmaps):
     return joints
 
 # ---------- Temporal Smoothing ----------
-SMOOTHING_FRAMES = 3   # shorter window for less latency
+SMOOTHING_FRAMES = 3
 joint_history = [deque(maxlen=SMOOTHING_FRAMES) for _ in range(NUM_JOINTS)]
 
 def smooth_points(points):
@@ -53,6 +54,19 @@ def smooth_points(points):
             ys = [pt[1] for pt in joint_history[i]]
             smoothed.append((int(sum(xs)/len(xs)), int(sum(ys)/len(ys))))
     return smoothed
+
+# ---------- Timestamp Function ----------
+def draw_timestamp(frame):
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    scale = 0.5
+    color = (255, 255, 255)  # white
+    thickness = 1
+    text_size, _ = cv2.getTextSize(timestamp, font, scale, thickness)
+    text_w, text_h = text_size
+    x = frame.shape[1] - text_w - 10
+    y = frame.shape[0] - 10
+    cv2.putText(frame, timestamp, (x, y), font, scale, color, thickness, cv2.LINE_AA)
 
 # ---------- Camera ----------
 cap = cv2.VideoCapture(0)
@@ -73,7 +87,7 @@ while True:
         if float(det[2]) < 0.6:
             continue
 
-        # ---------- Improved Robust Bounding Box ----------
+        # ---------- Robust Bounding Box ----------
         pad = 20
         xmin = max(0, int(det[3] * W) - pad)
         ymin = max(0, int(det[4] * H) - pad)
@@ -95,10 +109,10 @@ while True:
 
         joints = decode_pose(heatmaps)
 
-        # ---- Map to frame coordinates ----
+        # ---- Map joints to frame coordinates ----
         points = []
         for xh, yh, jc in joints:
-            if jc < 0.03:  # lower confidence threshold for robustness
+            if jc < 0.03:  # lower confidence threshold
                 points.append(None)
                 continue
 
@@ -119,13 +133,14 @@ while True:
             if points[a] and points[b]:
                 cv2.line(frame, points[a], points[b], (255,0,0), 2)
 
+    # ---- Draw Timestamp ----
+    draw_timestamp(frame)
+
     # ---- Display ----
-    cv2.imshow("Robust CPU Pose", frame)
+    cv2.imshow("Robust CPU Pose + Timestamp", frame)
 
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
 
 cap.release()
 cv2.destroyAllWindows()
-
-
