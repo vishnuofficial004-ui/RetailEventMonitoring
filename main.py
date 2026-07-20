@@ -91,6 +91,29 @@ def generate_event_id() -> str:
 def get_camera_sources(camera_id: str):
     return CAMERA_SOURCES.get(camera_id, [])
 
+def resolve_severity(alert_type: str, severity_override: str = None) -> Severity:
+    """
+    Resolve the Severity for a given alert type.
+
+    Priority:
+    1. Client-supplied override (validated against Severity enum names)
+    2. ALERT_SEVERITY_MAP lookup by alert_type
+    3. DEFAULT_SEVERITY fallback for unknown alert types
+
+    An invalid override (typo, unsupported level, wrong type) is
+    logged and ignored rather than raising — a malformed override
+    from an upstream camera/agent shouldn't be able to crash event
+    ingestion.
+    """
+    if severity_override:
+        try:
+            return Severity[str(severity_override).upper()]
+        except KeyError:
+            print(f"[WARN] Invalid severity override '{severity_override}' "
+                  f"for alert_type='{alert_type}', falling back to map")
+
+    return ALERT_SEVERITY_MAP.get(alert_type, DEFAULT_SEVERITY)
+
 # =========================================================
 # Trigger / Alert Logic
 # =========================================================
@@ -226,13 +249,34 @@ async def receive_event(request: Request):
     if not alerts:
         return {"status": "failed", "message": "No alerts provided"}
 
+    # Each alert can be either a plain string ("loitering") or an
+    # object with an optional client-supplied severity override
+    # ({"type": "loitering", "severity": "HIGH"}). Normalize both
+    # into (alert_type, resolved_severity) pairs up front so the
+    # rest of the pipeline only ever deals with one shape.
+    resolved_alerts = []
     for alert in alerts:
-        await dispatch_alert_action(event_id, alert, camera_id)
+        if isinstance(alert, dict):
+            alert_type = alert.get("type")
+            severity_override = alert.get("severity")
+        else:
+            alert_type = alert
+            severity_override = None
+
+        if not alert_type:
+            print(f"[WARN] Skipping malformed alert entry: {alert}")
+            continue
+
+        severity = resolve_severity(alert_type, severity_override)
+        resolved_alerts.append({"type": alert_type, "severity": severity.name})
+
+    for alert in resolved_alerts:
+        await dispatch_alert_action(event_id, alert["type"], camera_id)
 
     return {
         "status": "success",
         "event_id": event_id,
-        "alerts_received": alerts
+        "alerts_received": resolved_alerts
     }
 
 # =========================================================
