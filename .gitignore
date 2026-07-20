@@ -1,6 +1,6 @@
-# Python virtual environment
-venv/
+# Python virtual environments
 env/
+venv/
 .venv/
 
 # Python cache
@@ -10,10 +10,21 @@ __pycache__/
 # Environment variables
 .env
 
-# IDE files
+# IDEs
 .vscode/
 .idea/
 
 # OS files
 .DS_Store
 Thumbs.db
+
+# Generated files
+*.bin
+*.xml
+
+# Local dependencies
+mmcv/
+
+# Project folders
+model/
+data/
