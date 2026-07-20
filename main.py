@@ -1,4 +1,5 @@
 from fastapi import FastAPI, Request
+from enum import IntEnum
 import threading
 import uuid
 import asyncio
@@ -8,6 +9,20 @@ import os
 import uvicorn
 import platform
 import multiprocessing
+
+
+# =========================================================
+# Severity Levels
+# =========================================================
+# IntEnum so severities are naturally orderable/comparable
+# (e.g. CRITICAL > HIGH), which we'll use later for routing
+# and priority-queue ordering.
+
+class Severity(IntEnum):
+    LOW = 1
+    MEDIUM = 2
+    HIGH = 3
+    CRITICAL = 4
 
 
 # =========================================================
@@ -204,4 +219,3 @@ async def receive_event(request: Request):
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
-
