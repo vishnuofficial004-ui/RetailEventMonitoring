@@ -238,15 +238,32 @@ async def dispatch_alert_action(event_id: str, alert_type: str, camera_id: str):
 # REST API Endpoint
 # =========================================================
 
+# Records receipt time (monotonic clock) per event_id so later
+# steps can compute end-to-end handling latency (dispatch
+# completion time − receipt time). A plain dict is fine for a
+# single-process prototype; a real deployment would use a
+# TTL'd store so entries don't leak memory if dispatch never
+# completes for some event.
+EVENT_RECEIPT_TIMES = {}
+
 @app.post("/api/v1/event")
 async def receive_event(request: Request):
+    # Captured before body parsing so latency reflects true
+    # end-to-end handling time, not just processing after
+    # the JSON has already been read off the wire.
+    receipt_time = time.monotonic()
+
     data = await request.json()
 
     event_id = generate_event_id()
+    EVENT_RECEIPT_TIMES[event_id] = receipt_time
+    print(f"[RECEIVE] Event={event_id} | Received at t={receipt_time:.6f}")
+
     alerts = data.get("alerts", [])
     camera_id = data.get("camera_id", "pc_cam")
 
     if not alerts:
+        EVENT_RECEIPT_TIMES.pop(event_id, None)
         return {"status": "failed", "message": "No alerts provided"}
 
     # Each alert can be either a plain string ("loitering") or an
