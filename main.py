@@ -62,6 +62,26 @@ ALERT_ACTION_MAP = {
 }
 
 # =========================================================
+# Alert → Severity Mapping
+# =========================================================
+# Kept as a separate map (rather than folded into
+# ALERT_ACTION_MAP) so severity and action-routing can
+# evolve independently — e.g. two alert types can share an
+# action but carry different severities.
+
+ALERT_SEVERITY_MAP = {
+    "identity_mismatch": Severity.MEDIUM,
+    "missing_from_workstation": Severity.MEDIUM,
+
+    "loitering": Severity.LOW,
+    "stealing": Severity.CRITICAL,
+
+    "unauthorized_access": Severity.HIGH
+}
+
+DEFAULT_SEVERITY = Severity.LOW
+
+# =========================================================
 # Utility Functions
 # =========================================================
 
