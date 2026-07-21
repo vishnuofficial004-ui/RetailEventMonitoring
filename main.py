@@ -1,5 +1,6 @@
 from fastapi import FastAPI, Request
 from enum import IntEnum
+from dataclasses import dataclass
 import threading
 import uuid
 import asyncio
@@ -204,6 +205,33 @@ def trigger_camera_process(event_id, alert_type, camera_id, duration=15):
     print(f"[PROCESS] Event={event_id} | Camera={camera_id} | PID={process.pid} started")
 
 # =========================================================
+# Routing Logic (severity + type → decision)
+# =========================================================
+# Separated from dispatch_alert_action on purpose: routing is
+# a pure decision (given inputs, what SHOULD happen) with no
+# side effects, while dispatch is what actually DOES it (beeps,
+# spawns processes, etc). Keeping the pure function separate
+# makes it trivially unit-testable without mocking cv2/threads.
+
+@dataclass(frozen=True)
+class RoutingDecision:
+    alert_type: str
+    action: str
+    severity: Severity
+    immediate: bool  # HIGH/CRITICAL bypass the priority queue — wired in step 8
+
+def route_event(alert_type: str, severity: Severity) -> RoutingDecision:
+    action = ALERT_ACTION_MAP.get(alert_type, "NONE")
+    immediate = severity >= Severity.HIGH
+
+    return RoutingDecision(
+        alert_type=alert_type,
+        action=action,
+        severity=severity,
+        immediate=immediate
+    )
+
+# =========================================================
 # Dispatcher Logic  ✅ UPDATED HERE
 # =========================================================
 
@@ -285,6 +313,11 @@ async def receive_event(request: Request):
             continue
 
         severity = resolve_severity(alert_type, severity_override)
+        decision = route_event(alert_type, severity)
+        print(f"[ROUTE] Event={event_id} | Type={alert_type} | "
+              f"Severity={decision.severity.name} | Action={decision.action} | "
+              f"Immediate={decision.immediate}")
+
         resolved_alerts.append({"type": alert_type, "severity": severity.name})
 
     for alert in resolved_alerts:
