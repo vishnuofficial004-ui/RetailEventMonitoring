@@ -294,6 +294,41 @@ async def dispatch_alert_action(event_id: str, alert_type: str, camera_id: str):
         print(f"[INFO] No action mapped for alert: {alert_type}")
 
 # =========================================================
+# Background Dispatch Worker
+# =========================================================
+# Consumes DISPATCH_QUEUE and calls dispatch_alert_action for
+# each item, highest priority first. Runs as a single
+# long-lived asyncio task started at app startup, not per-
+# request — one consumer draining a shared queue.
+#
+# Not fed by anything yet: enqueue_dispatch() is written but
+# receive_event() still calls dispatch_alert_action directly
+# (unchanged since before step 6). Wiring the endpoint to
+# actually go through this queue is steps 8-9, so HIGH/CRITICAL
+# vs LOW/MEDIUM can be routed differently rather than all-or-
+# nothing.
+
+async def dispatch_worker():
+    print("[WORKER] Dispatch worker started")
+    while True:
+        priority, seq, event_id, decision, camera_id = await DISPATCH_QUEUE.get()
+        try:
+            print(f"[WORKER] Dequeued Event={event_id} | Type={decision.alert_type} | "
+                  f"Severity={decision.severity.name} | qsize={DISPATCH_QUEUE.qsize()}")
+            await dispatch_alert_action(event_id, decision.alert_type, camera_id)
+        except Exception as e:
+            # A single bad dispatch must not kill the worker loop —
+            # every subsequent queued event would silently stop
+            # being processed if this exception propagated.
+            print(f"[WORKER][ERROR] Event={event_id} failed: {e}")
+        finally:
+            DISPATCH_QUEUE.task_done()
+
+@app.on_event("startup")
+async def start_background_workers():
+    asyncio.create_task(dispatch_worker())
+
+# =========================================================
 # REST API Endpoint
 # =========================================================
 
