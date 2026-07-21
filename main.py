@@ -316,6 +316,7 @@ async def dispatch_worker():
             print(f"[WORKER] Dequeued Event={event_id} | Type={decision.alert_type} | "
                   f"Severity={decision.severity.name} | qsize={DISPATCH_QUEUE.qsize()}")
             await dispatch_alert_action(event_id, decision.alert_type, camera_id)
+            record_dispatch_completion(event_id)
         except Exception as e:
             # A single bad dispatch must not kill the worker loop —
             # every subsequent queued event would silently stop
@@ -339,6 +340,37 @@ async def start_background_workers():
 # TTL'd store so entries don't leak memory if dispatch never
 # completes for some event.
 EVENT_RECEIPT_TIMES = {}
+
+def record_dispatch_completion(event_id: str):
+    """
+    Capture dispatch-completion time and compute end-to-end
+    handling latency against the receipt time stored in
+    EVENT_RECEIPT_TIMES (step 4).
+
+    Deliberately uses .get(), not .pop(): a single event_id can
+    carry MULTIPLE alerts (e.g. one camera frame flags both
+    "loitering" and "identity_mismatch"), and each alert's
+    dispatch calls this function independently. Popping on the
+    first call would leave every subsequent alert for that same
+    event with no receipt time to measure against.
+
+    KNOWN LIMITATION, not yet fixed: because we never pop,
+    EVENT_RECEIPT_TIMES entries are never cleaned up at all right
+    now — this is a real memory leak over the process lifetime.
+    Fixing it properly needs a per-event pending-dispatch counter
+    (decrement per alert, delete the entry when it hits zero),
+    which is out of scope for this step and left as a named gap.
+    """
+    completion_time = time.monotonic()
+    receipt_time = EVENT_RECEIPT_TIMES.get(event_id)
+
+    if receipt_time is None:
+        print(f"[LATENCY][WARN] No receipt time found for Event={event_id}")
+        return None
+
+    latency_ms = (completion_time - receipt_time) * 1000
+    print(f"[LATENCY] Event={event_id} | handling_latency_ms={latency_ms:.2f}")
+    return latency_ms
 
 @app.post("/api/v1/event")
 async def receive_event(request: Request):
@@ -398,6 +430,7 @@ async def receive_event(request: Request):
             print(f"[BYPASS] Event={event_id} | Type={decision.alert_type} | "
                   f"Severity={decision.severity.name} — immediate dispatch, skipping queue")
             await dispatch_alert_action(event_id, decision.alert_type, camera_id)
+            record_dispatch_completion(event_id)
         else:
             # LOW/MEDIUM severity: don't dispatch inline. Hand off
             # to DISPATCH_QUEUE and let the background worker
