@@ -10,6 +10,7 @@ import os
 import uvicorn
 import platform
 import multiprocessing
+import itertools
 
 
 # =========================================================
@@ -230,6 +231,36 @@ def route_event(alert_type: str, severity: Severity) -> RoutingDecision:
         severity=severity,
         immediate=immediate
     )
+
+# =========================================================
+# Dispatch Priority Queue
+# =========================================================
+# asyncio.PriorityQueue is a min-heap: the LOWEST value comes
+# out first. Severity is stored as a NEGATIVE int so CRITICAL
+# (4) becomes -4 and is dequeued before LOW (1) → -1.
+#
+# Queue items are plain tuples: (priority, seq, event_id,
+# decision, camera_id). `seq` (a monotonically increasing
+# counter) exists purely as a tiebreaker — if two items have
+# equal priority, PriorityQueue compares the NEXT tuple element
+# to order them, and RoutingDecision isn't orderable. Without
+# `seq`, two same-priority items would raise a TypeError trying
+# to compare dataclasses. `seq` also happens to preserve FIFO
+# order among equal-priority items, which is a nice side effect.
+#
+# No consumer reads from this queue yet — that's step 7. This
+# step only establishes the structure and how items get onto it.
+
+DISPATCH_QUEUE: asyncio.PriorityQueue = asyncio.PriorityQueue()
+_dispatch_seq = itertools.count()
+
+async def enqueue_dispatch(event_id: str, decision: RoutingDecision, camera_id: str):
+    priority = -int(decision.severity)
+    seq = next(_dispatch_seq)
+    await DISPATCH_QUEUE.put((priority, seq, event_id, decision, camera_id))
+    print(f"[QUEUE] Event={event_id} | Type={decision.alert_type} | "
+          f"Severity={decision.severity.name} | priority={priority} | "
+          f"qsize={DISPATCH_QUEUE.qsize()}")
 
 # =========================================================
 # Dispatcher Logic  ✅ UPDATED HERE
