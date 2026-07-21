@@ -366,6 +366,7 @@ async def receive_event(request: Request):
     # into (alert_type, resolved_severity) pairs up front so the
     # rest of the pipeline only ever deals with one shape.
     resolved_alerts = []
+    decisions = []
     for alert in alerts:
         if isinstance(alert, dict):
             alert_type = alert.get("type")
@@ -385,9 +386,31 @@ async def receive_event(request: Request):
               f"Immediate={decision.immediate}")
 
         resolved_alerts.append({"type": alert_type, "severity": severity.name})
+        decisions.append(decision)
 
-    for alert in resolved_alerts:
-        await dispatch_alert_action(event_id, alert["type"], camera_id)
+    for decision in decisions:
+        if decision.immediate:
+            # HIGH/CRITICAL severity: skip the queue entirely and
+            # dispatch inline on this request's own coroutine, so
+            # urgent alerts (e.g. "stealing") aren't stuck waiting
+            # behind whatever the single background worker (step 7)
+            # happens to be processing at that moment.
+            print(f"[BYPASS] Event={event_id} | Type={decision.alert_type} | "
+                  f"Severity={decision.severity.name} — immediate dispatch, skipping queue")
+            await dispatch_alert_action(event_id, decision.alert_type, camera_id)
+        else:
+            # LOW/MEDIUM severity: don't dispatch inline. Hand off
+            # to DISPATCH_QUEUE and let the background worker
+            # (step 7) drain it in priority order. This is the
+            # actual behavior change deferred from step 8 — routine
+            # alerts no longer compete with urgent ones for this
+            # request's own execution time, and multiple routine
+            # alerts arriving in a burst get smoothed through one
+            # consumer instead of all firing dispatch side effects
+            # (beeps, camera processes) simultaneously.
+            print(f"[QUEUED] Event={event_id} | Type={decision.alert_type} | "
+                  f"Severity={decision.severity.name} — enqueued for background dispatch")
+            await enqueue_dispatch(event_id, decision, camera_id)
 
     return {
         "status": "success",
