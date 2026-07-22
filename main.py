@@ -11,6 +11,8 @@ import uvicorn
 import platform
 import multiprocessing
 import itertools
+import logging
+import json
 
 
 # =========================================================
@@ -25,6 +27,48 @@ class Severity(IntEnum):
     MEDIUM = 2
     HIGH = 3
     CRITICAL = 4
+
+
+# =========================================================
+# Structured Event Logger
+# =========================================================
+# Deliberately separate from the plain print() calls used
+# elsewhere in this file (e.g. [ROUTE], [QUEUE], [WORKER]).
+# Those are fine for human-readable console debugging, but
+# they're not machine-parseable — you can't grep/aggregate
+# them reliably (free-form f-strings, inconsistent field
+# order). This logger emits one JSON object per line
+# specifically for latency records, so it can later feed a
+# log aggregator (ELK/Datadog/CloudWatch) or the metrics
+# endpoint (step 14) without string-parsing print output.
+#
+# Scope is intentionally narrow: only latency records go
+# through this for now. Migrating every print() call in this
+# file to structured logging is a much bigger, separate change
+# and isn't part of this step.
+
+event_logger = logging.getLogger("event_pipeline")
+event_logger.setLevel(logging.INFO)
+_handler = logging.StreamHandler()
+_handler.setFormatter(logging.Formatter("%(message)s"))  # message IS the JSON; no extra prefix to keep it valid JSON per line
+event_logger.addHandler(_handler)
+event_logger.propagate = False
+
+def log_latency_record(event_id: str, alert_type: str, severity: Severity,
+                        camera_id: str, latency_ms: float):
+    record = {
+        "log_type": "dispatch_latency",
+        "event_id": event_id,
+        "alert_type": alert_type,
+        "severity": severity.name,
+        "camera_id": camera_id,
+        "latency_ms": round(latency_ms, 2),
+        "timestamp": time.time()  # wall-clock, for correlating with
+                                   # other systems' logs — NOT used
+                                   # for the latency math itself,
+                                   # which stays on monotonic clocks
+    }
+    event_logger.info(json.dumps(record))
 
 
 # =========================================================
@@ -316,7 +360,7 @@ async def dispatch_worker():
             print(f"[WORKER] Dequeued Event={event_id} | Type={decision.alert_type} | "
                   f"Severity={decision.severity.name} | qsize={DISPATCH_QUEUE.qsize()}")
             await dispatch_alert_action(event_id, decision.alert_type, camera_id)
-            record_dispatch_completion(event_id)
+            record_dispatch_completion(event_id, decision.alert_type, decision.severity, camera_id)
         except Exception as e:
             # A single bad dispatch must not kill the worker loop —
             # every subsequent queued event would silently stop
@@ -341,7 +385,7 @@ async def start_background_workers():
 # completes for some event.
 EVENT_RECEIPT_TIMES = {}
 
-def record_dispatch_completion(event_id: str):
+def record_dispatch_completion(event_id: str, alert_type: str, severity: Severity, camera_id: str):
     """
     Capture dispatch-completion time and compute end-to-end
     handling latency against the receipt time stored in
@@ -369,7 +413,7 @@ def record_dispatch_completion(event_id: str):
         return None
 
     latency_ms = (completion_time - receipt_time) * 1000
-    print(f"[LATENCY] Event={event_id} | handling_latency_ms={latency_ms:.2f}")
+    log_latency_record(event_id, alert_type, severity, camera_id, latency_ms)
     return latency_ms
 
 @app.post("/api/v1/event")
@@ -430,7 +474,7 @@ async def receive_event(request: Request):
             print(f"[BYPASS] Event={event_id} | Type={decision.alert_type} | "
                   f"Severity={decision.severity.name} — immediate dispatch, skipping queue")
             await dispatch_alert_action(event_id, decision.alert_type, camera_id)
-            record_dispatch_completion(event_id)
+            record_dispatch_completion(event_id, decision.alert_type, decision.severity, camera_id)
         else:
             # LOW/MEDIUM severity: don't dispatch inline. Hand off
             # to DISPATCH_QUEUE and let the background worker
