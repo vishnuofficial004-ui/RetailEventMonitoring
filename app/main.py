@@ -1,12 +1,3 @@
-"""
-FastAPI app entrypoint.
-
-This file should stay thin: app setup, the HTTP endpoint, and
-wiring the background worker to app startup. Everything else
-(severity resolution, routing decisions, dispatch side effects,
-queueing, latency metrics) lives in its own module — see the
-imports below for exactly what each one owns.
-"""
 
 import time
 import asyncio
@@ -17,8 +8,8 @@ from fastapi import FastAPI, Request
 from app.severity import resolve_severity
 from app.routing import route_event
 from app.dispatch import dispatch_alert_action, generate_event_id
-from app.dispatch_queue import enqueue_dispatch, dispatch_worker
-from app.metrics import EVENT_RECEIPT_TIMES, record_dispatch_completion
+from app.dispatch_queue import enqueue_dispatch, dispatch_worker, DISPATCH_QUEUE
+from app.metrics import EVENT_RECEIPT_TIMES, record_dispatch_completion, get_latency_stats
 
 
 app = FastAPI()
@@ -105,6 +96,38 @@ async def receive_event(request: Request):
         "status": "success",
         "event_id": event_id,
         "alerts_received": resolved_alerts
+    }
+
+
+@app.get("/api/v1/metrics")
+async def get_metrics():
+    """
+    Exposes rolling dispatch-latency stats (avg/p95 over the last
+    LATENCY_WINDOW_SIZE=500 dispatches, from metrics.py) plus
+    current queue depth, as a quick operational snapshot.
+
+    This is the endpoint that turns the "~200ms avg handling
+    latency" resume claim from something asserted into something
+    actually measured and queryable — hit this after running real
+    traffic through /api/v1/event (see the load-test script in a
+    later step) to get a real number, not a guessed one.
+    """
+    stats = get_latency_stats()
+
+    if stats is None:
+        # Explicit empty state, not a fabricated 0ms reading —
+        # "no data yet" and "0ms latency" are very different
+        # things and conflating them would be misleading.
+        return {
+            "status": "no_data",
+            "message": "No dispatches recorded yet",
+            "queue_depth": DISPATCH_QUEUE.qsize()
+        }
+
+    return {
+        "status": "ok",
+        "latency": stats,
+        "queue_depth": DISPATCH_QUEUE.qsize()
     }
 
 
